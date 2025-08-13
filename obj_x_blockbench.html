@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OBJ/GLTF/FBX → Blocky → .bbmodel (Failsafe)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html,body{height:100%;margin:0;background:#0e0f12;color:#e8eaed;font-family:system-ui,Segoe UI,Roboto,Arial}
+  .app{display:grid;grid-template-columns:400px 1fr;gap:16px;height:100%}
+  aside{padding:16px;border-right:1px solid #282a2f;overflow:auto}
+  main{position:relative}
+  canvas{width:100%;height:100%;display:block;background:#111}
+  h1{font-size:16px;margin:0 0 8px} h2{font-size:14px;margin:16px 0 8px;color:#9aa0a6}
+  .row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:8px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .btn{background:#1a73e8;border:0;color:#fff;padding:8px 10px;border-radius:6px;cursor:pointer}
+  .btn.secondary{background:#383b41}
+  .btn:disabled{background:#2b2f36;cursor:not-allowed}
+  input[type="file"]{width:100%}
+  input[type="number"],select{width:100%;box-sizing:border-box;background:#1c1f24;border:1px solid #2b2f36;color:#e8eaed;border-radius:6px;padding:6px 8px}
+  input[type="checkbox"]{transform:scale(1.1);margin-right:6px}
+  .small{font-size:12px;color:#9aa0a6}
+  .log{white-space:pre-wrap;background:#0b0c0f;border:1px solid #2b2f36;padding:10px;border-radius:6px;height:220px;overflow:auto}
+  .status{font-size:12px;color:#c9d1d9;margin-top:6px}
+  .status .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle;background:#b23}
+  .status.ready .dot{background:#2bb673}
+  .status.loading .dot{background:#f39c12}
+  .drop{margin-top:10px;padding:8px;border:1px dashed #3a3f47;border-radius:6px;color:#9aa0a6}
+  .drop.over{background:#14161b}
+  label.cb{display:flex;align-items:center;gap:8px}
+</style>
+
+<!-- Import map for ES modules -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1>Voxelize → .bbmodel</h1>
+
+    <div id="status" class="status"><span class="dot"></span><span id="statusText">No model loaded</span></div>
+
+    <h2>1) Load Model</h2>
+    <div class="row"><label>OBJ</label><input id="objFile" type="file" accept=".obj" /></div>
+    <div class="row"><label>MTL (optional)</label><input id="mtlFile" type="file" accept=".mtl" /></div>
+    <div class="row"><label>GLTF/GLB</label><input id="gltfFile" type="file" accept=".gltf,.glb" /></div>
+    <div class="row"><label>FBX</label><input id="fbxFile" type="file" accept=".fbx" /></div>
+    <div class="row"><label>Textures / .bin (multiple)</label><input id="texFiles" type="file" accept="image/*,.bin,.tga" multiple /></div>
+    <div class="drop" id="dropZone">…or drop OBJ/MTL/GLB/GLTF/FBX + textures here</div>
+
+    <h2>Texture safety</h2>
+    <div class="row"><label class="cb"><input id="diffuseOnly" type="checkbox" checked/>Diffuse-only (skip bump/spec/normal)</label></div>
+    <div class="row"><label class="cb"><input id="capTextures" type="checkbox" checked/>Cap texture size</label>
+      <select id="maxTex"><option>512</option><option selected>1024</option><option>2048</option></select>
+    </div>
+
+    <h2>2) Voxelization Settings</h2>
+    <div class="row"><label>Voxel size (world units)</label><input id="voxelSize" type="number" min="0.01" step="0.01" value="0.05" /></div>
+    <div class="row"><label>Export scale: 0–16 (Blockbench)</label><input id="bbScale" type="checkbox" checked /></div>
+    <div class="row"><label>Solid fill interior</label><input id="solidFill" type="checkbox" /></div>
+    <div class="row"><label>Bake color from UVs</label><input id="bakeColor" type="checkbox" checked /></div>
+
+    <h2>3) Actions</h2>
+    <div class="grid2">
+      <button id="convertBtn" class="btn">Convert & Preview</button>
+      <button id="exportBtn" class="btn secondary" disabled>Export .bbmodel</button>
+    </div>
+    <div class="grid2" style="margin-top:8px">
+      <button id="fastBtn" class="btn secondary" title="Auto-tune voxel size + InstancedMesh preview">Fast preview</button>
+      <button id="frameBtn" class="btn secondary" title="Frame camera to model" disabled>Frame</button>
+    </div>
+    <div class="grid2" style="margin-top:8px">
+      <button id="resetBtn" class="btn secondary">Reset Scene</button>
+      <button id="resetAllBtn" class="btn secondary" title="Also clears MTL/texture mapping">Reset All</button>
+    </div>
+    <div class="grid2" style="margin-top:8px">
+      <button id="testBtn" class="btn secondary">Run tests</button>
+      <button id="demoBtn" class="btn secondary" title="Load a sample cube">Load Sample Cube</button>
+    </div>
+
+    <h2>Log</h2>
+    <div id="log" class="log"></div>
+    <div class="small">Tip: if it ever goes black, reload page, keep “Diffuse-only” + “Cap textures” on, then load again.</div>
+  </aside>
+
+  <main>
+    <canvas id="view"></canvas>
+  </main>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { TGALoader } from 'three/addons/loaders/TGALoader.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+(function bootWhenReady(){
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+
+function boot(){
+  /* ===== Helpers / logging ===== */
+  const el = id => document.getElementById(id);
+  const logEl = el('log');
+  const log = (...m)=>{ if(logEl){ logEl.textContent += m.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; } };
+  window.addEventListener('error', e => log('Error:', e.message));
+  window.addEventListener('unhandledrejection', e => log('Unhandled:', (e.reason && (e.reason.message||e.reason)) || 'Unknown'));
+
+  /* ===== Scene (after DOM is ready) ===== */
+  const canvas = el('view');
+  const DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
+  renderer.setPixelRatio(DPR);
+  if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+  else renderer.outputEncoding = THREE.sRGBEncoding;
+  const scene = new THREE.Scene(); scene.background = new THREE.Color(0x111111);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 4000); camera.position.set(3,3,6);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x202020, 0.9));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(5,10,7); scene.add(dir);
+  const grid = new THREE.GridHelper(20, 20, 0x333333, 0x222222); grid.position.y = -0.001; scene.add(grid);
+
+  function resize(){ if(!canvas) return; renderer.setSize(canvas.clientWidth, canvas.clientHeight, false); camera.aspect=canvas.clientWidth/canvas.clientHeight; camera.updateProjectionMatrix(); }
+  addEventListener('resize', resize); resize();
+  (function loop(){ requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+  renderer.domElement.addEventListener('webglcontextlost', (e)=>{ e.preventDefault(); log('⚠️ WebGL context LOST — likely out of GPU memory. Enable “Diffuse-only” + “Cap textures” and reload the model.'); setStatus('', 'GPU context lost'); });
+  renderer.domElement.addEventListener('webglcontextrestored', ()=>{ log('WebGL context restored'); });
+
+  /* ===== Status / enablement (DOM-guarded) ===== */
+  function setStatus(kind, text){
+    const statusRow = el('status'), statusText = el('statusText');
+    if(!statusRow || !statusText) return;
+    statusRow.classList.toggle('ready', kind==='ready');
+    statusRow.classList.toggle('loading', kind==='loading');
+    statusText.textContent = text;
+  }
+  function setEnabled(loaded, allowConvert){
+    const frameBtn  = el('frameBtn');  if(frameBtn)  frameBtn.disabled  = !loaded;
+    const fastBtn   = el('fastBtn');   if(fastBtn)   fastBtn.disabled   = !(loaded && allowConvert);
+    const convertBtn= el('convertBtn');if(convertBtn)convertBtn.disabled= !(loaded && allowConvert);
+    const exportBtn = el('exportBtn'); if(exportBtn) exportBtn.disabled = true;
+  }
+
+  /* ===== Camera framing ===== */
+  function frameObject(obj) {
+    try{
+      const box = new THREE.Box3().setFromObject(obj);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      if(!isFinite(size.x+size.y+size.z)) throw new Error('Invalid bounds');
+      controls.target.copy(center);
+      const maxDim = Math.max(size.x,size.y,size.z) || 1;
+      const dist = maxDim / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
+      camera.position.copy(center).add(new THREE.Vector3(dist * 1.2, dist * 0.8, dist * 1.2));
+      camera.near = Math.max(0.01, maxDim / 500); camera.far = Math.max(1000, dist * 10);
+      camera.updateProjectionMatrix(); controls.update();
+    }catch(e){
+      log('Frame fallback:', e.message);
+      camera.position.set(3,3,6); controls.target.set(0,0,0); camera.near=0.01; camera.far=4000; camera.updateProjectionMatrix(); controls.update();
+    }
+  }
+
+  /* ===== Loading manager (blob resolver + TGA + progress) ===== */
+  const manager = new THREE.LoadingManager();
+  const fileRegistry = new Map(); // filename(lower) -> objectURL
+  const extractFilenameAny = (url)=>{
+    let s = decodeURIComponent(url).replace(/^file:\/*/i,''); s = s.replace(/^[A-Za-z]:[\\/]/, ''); const parts = s.replace(/\\/g,'/').split('/'); return (parts.pop() || '').toLowerCase();
+  };
+  const addFiles=(files)=>{ if(!files) return; [...files].forEach(f=>{ const key=f.name.toLowerCase(); if(!fileRegistry.has(key)) fileRegistry.set(key, URL.createObjectURL(f)); }); };
+  manager.setURLModifier(url => fileRegistry.get(extractFilenameAny(url)) || url);
+  manager.addHandler(/\.tga$/i, new TGALoader(manager));
+
+  let pendingLoads = 0;
+  manager.onStart = ()=>{ pendingLoads = 0; setStatus('loading','Loading textures…'); setEnabled(!!viewRoot,false); };
+  manager.onLoad  = ()=>{ setStatus('ready', viewRoot ? 'Model loaded' : 'No model loaded'); setEnabled(!!viewRoot,true); if(viewRoot) postprocessSceneTextures(viewRoot); if(dataRoot) postprocessSceneTextures(dataRoot); };
+  manager.onError = (url)=>{ log('Missing asset:', url); };
+  manager.itemStart = ()=>{ pendingLoads++; };
+  manager.itemEnd   = ()=>{ pendingLoads = Math.max(0, pendingLoads-1); };
+
+  /* ===== Loaders ===== */
+  const objLoader  = new OBJLoader(manager);
+  const mtlLoader  = new MTLLoader(manager);
+  const gltfLoader = new GLTFLoader(manager);
+  const draco      = new DRACOLoader(manager);
+  draco.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+  gltfLoader.setDRACOLoader(draco);
+  const fbxLoader  = new FBXLoader(manager);
+
+  /* ===== State ===== */
+  let dataRoot = null;
+  let viewRoot = null;
+  let previewGroup = null;
+  let lastBBModel = null;
+  let currentMTL = null;
+  let lastOBJFile = null;
+
+  /* ===== File utils ===== */
+  const fileToText = f => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsText(f); });
+  const fileToArrayBuffer = f => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsArrayBuffer(f); });
+
+  /* ===== MTL sanitizer ===== */
+  function sanitizeMTL(text, {diffuseOnly=false}={}){
+    if(diffuseOnly){
+      text = text.replace(/^\s*(?:bump|map_bump|map_Bump|map_Ks|map_Ns|map_d|disp|decal|refl|norm|map_normal|map_Pr|map_Pm|map_Ps)\b.*$/gmi, '');
+    }
+    const re = /^(\s*(?:map_\w+|bump|disp|decal|refl)\s+(?:-[^\s]+\s+)*)("?)(.+?)\2\s*$/gmi;
+    text = text.replace(re, (all, prefix, quote, path) => {
+      let base = path.replace(/^file:\/*/i, '').replace(/^[A-Za-z]:[\\/]/, '').split(/[\\/]/).pop();
+      return `${prefix}${base}`;
+    });
+    return text;
+  }
+
+  /* ===== Install roots (view vs data) ===== */
+  function installRoots(originalRoot){
+    if(viewRoot){ scene.remove(viewRoot); viewRoot=null; }
+    if(previewGroup){ scene.remove(previewGroup); previewGroup=null; }
+    lastBBModel=null; const exportBtn=el('exportBtn'); if(exportBtn) exportBtn.disabled=true;
+
+    dataRoot = originalRoot;
+    viewRoot = SkeletonUtils.clone(originalRoot);
+
+    viewRoot.traverse(o=>{
+      if (o.isMesh) {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        o.material = mats.map(m=>{
+          if(!m) return m;
+          const mc = m.clone();
+          if (mc.map) {
+            if (mc.color && (mc.color.r===0 && mc.color.g===0 && mc.color.b===0)) mc.color.set(0xffffff);
+            if ('colorSpace' in mc.map) mc.map.colorSpace = THREE.SRGBColorSpace;
+            else if ('encoding' in mc.map) mc.map.encoding = THREE.sRGBEncoding;
+            mc.map.needsUpdate = true;
+          }
+          if (mc.opacity === 0) { mc.opacity = 1; mc.transparent = false; }
+          mc.side = THREE.DoubleSide;
+          return mc;
+        });
+      }
+    });
+
+    const box = new THREE.Box3().setFromObject(viewRoot);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    viewRoot.position.sub(center);
+    const maxDim = Math.max(size.x,size.y,size.z)||1;
+    viewRoot.scale.setScalar(2/maxDim);
+
+    scene.add(viewRoot);
+    frameObject(viewRoot);
+    setStatus('ready','Model loaded (textures finishing…)');
+    setEnabled(true, pendingLoads===0);
+    log('View bounds:', size.toArray().map(n=>n.toFixed(3)).join(', '));
+  }
+
+  /* ===== Inputs & drag-drop ===== */
+  function takeFiles(fileList){
+    addFiles(fileList);
+    const arr = [...fileList];
+    const obj = arr.find(f=>/\.obj$/i.test(f.name));
+    const mtl = arr.find(f=>/\.mtl$/i.test(f.name));
+    const glb = arr.find(f=>/\.glb$/i.test(f.name));
+    const gltf= arr.find(f=>/\.gltf$/i.test(f.name));
+    const fbx = arr.find(f=>/\.fbx$/i.test(f.name));
+    const diffuseOnly = el('diffuseOnly')?.checked;
+
+    if(mtl){ (async()=>{
+      const raw = await fileToText(mtl);
+      const txt = sanitizeMTL(raw, {diffuseOnly});
+      currentMTL = mtlLoader.parse(txt,'');
+      currentMTL.preload();
+      log('MTL loaded via drop:', mtl.name, diffuseOnly?'(diffuse-only)':'');
+      if(obj) await loadOBJFromFile(obj);
+    })(); }
+    else if(obj) loadOBJFromFile(obj);
+    else if(glb) (async()=>{ const buf=await fileToArrayBuffer(glb); gltfLoader.parse(buf,'',g=>installRoots(g.scene),err=>log('GLB parse error:',err?.message||err)); })();
+    else if(gltf)(async()=>{ const txt=await fileToText(gltf); gltfLoader.parse(txt,'',g=>installRoots(g.scene),err=>log('GLTF parse error:',err?.message||err)); })();
+    else if(fbx) (async()=>{ const buf=await fileToArrayBuffer(fbx); try{ installRoots(fbxLoader.parse(buf,'')); }catch(e){ log('FBX parse error:', e.message||e); } })();
+  }
+
+  el('texFiles')?.addEventListener('change', ()=>{ addFiles(el('texFiles').files); log('Registered:', [...fileRegistry.keys()].join(', ')||'(none)'); });
+  el('mtlFile')?.addEventListener('change', async ()=>{
+    const f=el('mtlFile').files[0]; if(!f) return;
+    addFiles(el('texFiles').files); addFiles([f]);
+    const raw=await fileToText(f);
+    const txt=sanitizeMTL(raw, {diffuseOnly: el('diffuseOnly')?.checked});
+    currentMTL = mtlLoader.parse(txt,'');
+    currentMTL.preload();
+    log('MTL loaded:', f.name, el('diffuseOnly')?.checked?'(diffuse-only)':'');
+    if(lastOBJFile){ log('Reloading OBJ with MTL…'); await loadOBJFromFile(lastOBJFile); }
+  });
+  el('objFile')?.addEventListener('change', async ()=>{ const f=el('objFile').files[0]; if(!f) return; addFiles([f]); await loadOBJFromFile(f); });
+  el('gltfFile')?.addEventListener('change', async ()=>{
+    const f=el('gltfFile').files[0]; if(!f) return;
+    addFiles(el('texFiles').files); addFiles([f]);
+    const name=f.name.toLowerCase();
+    if(name.endsWith('.glb')){ const buf=await fileToArrayBuffer(f); gltfLoader.parse(buf,'',g=>installRoots(g.scene),err=>log('GLB parse error:',err?.message||err)); }
+    else { const txt=await fileToText(f); gltfLoader.parse(txt,'',g=>installRoots(g.scene),err=>log('GLTF parse error:',err?.message||err)); }
+  });
+  el('fbxFile')?.addEventListener('change', async ()=>{
+    const f=el('fbxFile').files[0]; if(!f) return;
+    addFiles([f]); try{ const buf=await fileToArrayBuffer(f); installRoots(fbxLoader.parse(buf,'')); }catch(e){ log('FBX parse error:', e.message||e); }
+  });
+
+  const dropZone = el('dropZone');
+  dropZone?.addEventListener('dragenter', e=>{e.preventDefault(); dropZone.classList.add('over');});
+  dropZone?.addEventListener('dragover',  e=>{e.preventDefault(); dropZone.classList.add('over');});
+  ['dragleave','drop'].forEach(ev=>dropZone?.addEventListener(ev, e=>{e.preventDefault(); dropZone.classList.remove('over');}));
+  dropZone?.addEventListener('drop', e=>{
+    const dt = e.dataTransfer;
+    if(dt && dt.files && dt.files.length){ takeFiles(dt.files); }
+  });
+
+  /* ===== OBJ local parse ===== */
+  async function loadOBJFromFile(file){
+    try{
+      lastOBJFile = file;
+      addFiles(el('texFiles')?.files);
+      const text = await fileToText(file);
+      const loader = new OBJLoader(manager);
+      if(currentMTL) loader.setMaterials(currentMTL); else loader.setMaterials(null);
+      const obj = loader.parse(text);
+      installRoots(obj);
+    }catch(e){ console.error(e); log('OBJ parse error:', e.message || e); setEnabled(false,false); }
+  }
+
+  /* ===== Texture post-processing (VRAM saver) ===== */
+  function postprocessSceneTextures(root){
+    const cap = el('capTextures')?.checked;
+    const maxDim = parseInt(el('maxTex')?.value,10) || 1024;
+    const diffuseOnly = el('diffuseOnly')?.checked;
+
+    root.traverse(o=>{
+      if(!o.isMesh) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(m=>{
+        if(!m) return;
+        if(diffuseOnly){
+          ['normalMap','bumpMap','specularMap','metalnessMap','roughnessMap','displacementMap','envMap','lightMap','aoMap','emissiveMap'].forEach(k=>{
+            if(m[k]) { m[k].dispose?.(); m[k]=null; }
+          });
+        }
+        if(m.map){ safeTexture(m.map, cap?maxDim:0); }
+        m.transparent = !!(m.alphaMap || (m.map && m.map.format===THREE.AlphaFormat)) ? true : m.transparent;
+        m.depthWrite = !m.transparent;
+        m.needsUpdate = true;
+      });
+    });
+  }
+  function safeTexture(tex, maxDim){
+    try{
+      if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace; else if ('encoding' in tex) tex.encoding = THREE.sRGBEncoding;
+      tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter; tex.anisotropy = 0;
+      if(maxDim>0 && tex.image && tex.image.width && tex.image.height){
+        const w = tex.image.width, h = tex.image.height, big=Math.max(w,h);
+        if(big > maxDim){
+          const scale = maxDim / big, nw=Math.max(1, Math.round(w*scale)), nh=Math.max(1, Math.round(h*scale));
+          const cnv = document.createElement('canvas'); cnv.width=nw; cnv.height=nh;
+          const ctx = cnv.getContext('2d');
+          if(tex.image.data && w && h){
+            const src = document.createElement('canvas'); src.width=w; src.height=h;
+            const sctx=src.getContext('2d'); const id = sctx.createImageData(w,h); id.data.set(tex.image.data); sctx.putImageData(id,0,0);
+            ctx.drawImage(src,0,0,nw,nh);
+          }else{
+            ctx.drawImage(tex.image,0,0,nw,nh);
+          }
+          tex.image = cnv; tex.needsUpdate = true; log(`Downscaled texture to ${nw}×${nh}`);
+        }
+      }
+    }catch(e){ log('safeTexture error:', e.message); }
+  }
+
+  /* ===== Merge / Voxelize / Bake / Export / Preview (unchanged core) ===== */
+  function mergeWorldGeometry(root){
+    const geoms = [];
+    root.updateWorldMatrix(true,true);
+    root.traverse(o=>{
+      if(o.isMesh && o.geometry){
+        const g = o.geometry.clone().applyMatrix4(o.matrixWorld);
+        if(!g.index){ g.setIndex([...Array(g.attributes.position.count).keys()]); }
+        geoms.push(g);
+      }
+    });
+    if(!geoms.length) return null;
+    const merged = BufferGeometryUtils.mergeGeometries(geoms, true);
+    merged.computeVertexNormals();
+    return merged;
+  }
+  function voxelizeSurface(root, voxelSize, {solidFill}){
+    const geom = mergeWorldGeometry(root);
+    if(!geom){ return {voxels:[], grid:null}; }
+    const bbox = new THREE.Box3().setFromBufferAttribute(geom.getAttribute('position'));
+    const min = bbox.min.clone(), max = bbox.max.clone();
+    const size = new THREE.Vector3().subVectors(max, min);
+    const nx = Math.max(1, Math.ceil(size.x / voxelSize));
+    const ny = Math.max(1, Math.ceil(size.y / voxelSize));
+    const nz = Math.max(1, Math.ceil(size.z / voxelSize));
+    const occupied = new Set(), key=(i,j,k)=>`${i},${j},${k}`;
+    const tri = new THREE.Triangle();
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const vmin = new THREE.Vector3(), vmax = new THREE.Vector3();
+    const voxelBox = new THREE.Box3();
+    const pos = geom.getAttribute('position');
+    const idx = geom.getIndex();
+    const triCount = (idx ? idx.count : pos.count) / 3;
+    for(let t=0; t<triCount; t++){
+      const i0 = idx ? idx.getX(t*3+0) : t*3+0;
+      const i1 = idx ? idx.getX(t*3+1) : t*3+1;
+      const i2 = idx ? idx.getX(t*3+2) : t*3+2;
+      a.fromBufferAttribute(pos, i0); b.fromBufferAttribute(pos, i1); c.fromBufferAttribute(pos, i2); tri.set(a,b,c);
+      vmin.set(Math.min(a.x,b.x,c.x), Math.min(a.y,b.y,c.y), Math.min(a.z,b.z,c.z)).sub(min);
+      vmax.set(Math.max(a.x,b.x,c.x), Math.max(a.y,b.y,c.y), Math.max(a.z,b.z,c.z)).sub(min);
+      const iMin = Math.max(0, Math.floor(vmin.x / voxelSize));
+      const jMin = Math.max(0, Math.floor(vmin.y / voxelSize));
+      const kMin = Math.max(0, Math.floor(vmin.z / voxelSize));
+      const iMax = Math.min(nx-1, Math.floor(vmax.x / voxelSize));
+      const jMax = Math.min(ny-1, Math.floor(vmax.y / voxelSize));
+      const kMax = Math.min(nz-1, Math.floor(vmax.z / voxelSize));
+      for(let i=iMin;i<=iMax;i++) for(let j=jMin;j<=jMax;j++) for(let k=kMin;k<=kMax;k++){
+        voxelBox.min.set(min.x + i*voxelSize,     min.y + j*voxelSize,     min.z + k*voxelSize);
+        voxelBox.max.set(min.x + (i+1)*voxelSize, min.y + (j+1)*voxelSize, min.z + (k+1)*voxelSize);
+        if(voxelBox.intersectsTriangle(tri)) occupied.add(key(i,j,k));
+      }
+    }
+    if(solidFill){
+      const inB = (i,j,k)=> i>=0&&j>=0&&k>=0&&i<nx&&j<ny&&k<nz;
+      const exterior = new Set(), q=[];
+      const push=(i,j,k)=>{ const kk=key(i,j,k); if(!exterior.has(kk) && !occupied.has(kk)){ exterior.add(kk); q.push([i,j,k]); } };
+      for(let i=0;i<nx;i++) for(let j=0;j<ny;j++){ push(i,j,0); push(i,j,nz-1); }
+      for(let i=0;i<nx;i++) for(let k=0;k<nz;k++){ push(i,0,k); push(i,ny-1,k); }
+      for(let j=0;j<ny;j++) for(let k=0;k<nz;k++){ push(0,j,k); push(nx-1,j,k); }
+      while(q.length){
+        const [i,j,k]=q.shift();
+        [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]].forEach(([di,dj,dk])=>{
+          const ni=i+di,nj=j+dj,nk=k+dk;
+          if(inB(ni,nj,nk)){ const kk=key(ni,nj,nk); if(!exterior.has(kk) && !occupied.has(kk)){ exterior.add(kk); q.push([ni,nj,nk]); } }
+        });
+      }
+      for(let i=0;i<nx;i++) for(let j=0;j<ny;j++) for(let k=0;k<nz;k++){ const kk=key(i,j,k); if(!exterior.has(kk)) occupied.add(kk); }
+    }
+    const voxels=[]; occupied.forEach(kk=>{ const [i,j,k] = kk.split(',').map(Number); voxels.push({ x: min.x + i*voxelSize, y: min.y + j*voxelSize, z: min.z + k*voxelSize, _k: kk }); });
+    return { voxels, grid: { voxelSize, min, max } };
+  }
+  function materialForHit(hit){
+    const obj = hit.object; if(!obj || !obj.isMesh) return null;
+    const mat = obj.material; if(!Array.isArray(mat)) return mat || null;
+    const geom = obj.geometry; if(!geom || !geom.groups || !geom.groups.length) return mat[0] || null;
+    const tri = hit.faceIndex ?? 0; const triStart = tri * 3;
+    const idx = geom.groups.findIndex(g => triStart >= g.start && triStart < (g.start + g.count));
+    return mat[Math.max(0, idx)] || mat[0] || null;
+  }
+  function texToCanvas(tex){
+    if(!tex || !tex.image) return null;
+    const img = tex.image;
+    if(img.width && img.height && img.data){
+      const cnv = document.createElement('canvas'); cnv.width=img.width; cnv.height=img.height;
+      const ctx = cnv.getContext('2d'); const id = ctx.createImageData(img.width, img.height);
+      id.data.set(img.data); ctx.putImageData(id,0,0); return { ctx, w:img.width, h:img.height };
+    } else if(img.width && img.height){
+      const cnv = document.createElement('canvas'); cnv.width=img.width; cnv.height=img.height;
+      const ctx = cnv.getContext('2d'); ctx.drawImage(img,0,0); return { ctx, w:img.width, h:img.height };
+    }
+    return null;
+  }
+  function buildMaterialCanvases(root){
+    const map = new Map();
+    root.traverse(o=>{
+      if(o.isMesh){
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(m=>{
+          if(!m || map.has(m.uuid)) return;
+          const tex = m.map;
+          if(tex){
+            if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace; else if ('encoding' in tex) tex.encoding = THREE.sRGBEncoding;
+            const entry = texToCanvas(tex); if(entry) map.set(m.uuid, entry);
+          }
+        });
+      }
+    });
+    return map;
+  }
+  function bakePalette(voxels, root, grid){
+    const mats = buildMaterialCanvases(root);
+    const raycaster = new THREE.Raycaster();
+    const dirs = [new THREE.Vector3(1,0,0), new THREE.Vector3(0,1,0), new THREE.Vector3(0,0,1), new THREE.Vector3(-1,0,0), new THREE.Vector3(0,-1,0), new THREE.Vector3(0,0,-1)];
+    const palette = []; const colorIndex = new Map(); const keyToIdx = new Map();
+    const uvSample=(ctx,w,h,u,v)=>{ const x=Math.min(w-1,Math.max(0,Math.round(u*(w-1)))); const y=Math.min(h-1,Math.max(0,Math.round((1-v)*(h-1)))); const d=ctx.getImageData(x,y,1,1).data; return [d[0],d[1],d[2],d[3]]; };
+    voxels.forEach(v=>{
+      const center = new THREE.Vector3(v.x + grid.voxelSize/2, v.y + grid.voxelSize/2, v.z + grid.voxelSize/2);
+      const samples = [];
+      for(const d of dirs){
+        raycaster.set(center.clone().addScaledVector(d, grid.voxelSize*1.5), d.clone().multiplyScalar(-1));
+        const hits = raycaster.intersectObject(root, true);
+        if(!hits.length) continue;
+        const h = hits[0]; const mat = materialForHit(h);
+        if(!mat || !mat.map) continue;
+        const entry = mats.get(mat.uuid); if(!entry) continue;
+        samples.push(uvSample(entry.ctx, entry.w, entry.h, h.uv.x, h.uv.y));
+        if(samples.length>=3) break;
+      }
+      let col = [200,220,255,255];
+      if(samples.length){ const s=samples.reduce((a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2],a[3]+b[3]],[0,0,0,0]); col=s.map(x=>Math.round(x/samples.length)); }
+      const k = col.join(','); let idx = keyToIdx.get(k);
+      if(idx===undefined){ idx = palette.length; palette.push(col); keyToIdx.set(k, idx); }
+      colorIndex.set(v._k, idx);
+    });
+    const n = Math.max(1, palette.length), side = Math.ceil(Math.sqrt(n));
+    const cnv = document.createElement('canvas'); cnv.width=side; cnv.height=side;
+    const ctx = cnv.getContext('2d'); const img = ctx.createImageData(side, side);
+    for(let i=0;i<n;i++){ const [r,g,b,a]=palette[i]; const off=i*4; img.data[off]=r; img.data[off+1]=g; img.data[off+2]=b; img.data[off+3]=a; }
+    ctx.putImageData(img,0,0);
+    return { palette, colorIndex, side, dataURL: cnv.toDataURL('image/png') };
+  }
+  function exportBBModel(voxels, grid, atlas, scaleTo16=true){
+    const bbox = new THREE.Box3();
+    voxels.forEach(v=>{
+      bbox.expandByPoint(new THREE.Vector3(v.x, v.y, v.z));
+      bbox.expandByPoint(new THREE.Vector3(v.x+grid.voxelSize, v.y+grid.voxelSize, v.z+grid.voxelSize));
+    });
+    const size = new THREE.Vector3(); bbox.getSize(size);
+    const scale = scaleTo16 ? (16 / Math.max(1e-6, Math.max(size.x,size.y,size.z))) : 1;
+    const textures = atlas ? [{ id:0, name:'atlas.png', path:'atlas.png', source: atlas.dataURL }] :
+                             [{ id:0, name:'white.png', path:'white.png', source:(()=>{const c=document.createElement('canvas'); c.width=c.height=1; return c.toDataURL();})()}];
+    function uvFor(idx){ if(!atlas) return [0,0,1,1]; const s = atlas.side, x = idx % s, y = Math.floor(idx / s); return [x, y, x+1, y+1]; }
+    const elements = voxels.map(v=>{
+      const fx = (v.x - bbox.min.x) * scale;
+      const fy = (v.y - bbox.min.y) * scale;
+      const fz = (v.z - bbox.min.z) * scale;
+      const tx = fx + grid.voxelSize * scale;
+      const ty = fy + grid.voxelSize * scale;
+      const tz = fz + grid.voxelSize * scale;
+      const idx = atlas ? atlas.colorIndex.get(v._k) || 0 : 0;
+      const uv = uvFor(idx);
+      const faces = { north:{ uv, texture:0 }, south:{ uv, texture:0 }, east:{ uv, texture:0 }, west:{ uv, texture:0 }, up:{ uv, texture:0 }, down:{ uv, texture:0 } };
+      return { name:`v_${fx.toFixed(3)}_${fy.toFixed(3)}_${fz.toFixed(3)}`, from:[fx,fy,fz], to:[tx,ty,tz], faces };
+    });
+    return { meta: { format_version:"4.6", model_format:"java_block", box_uv:false }, name: "voxelized_model", visible_box: [0,0,0,16,16,16], resolution: atlas ? [atlas.side, atlas.side] : [1,1], elements, textures };
+  }
+  const downloadJSON=(name, obj)=>{ const a=document.createElement('a'); a.href='data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(obj)); a.download=name; a.click(); };
+
+  function buildInstancedPreview(voxels, voxelSize, maxInstances=50000){
+    const count = Math.min(voxels.length, maxInstances);
+    const cube = new THREE.BoxGeometry(voxelSize, voxelSize, voxelSize);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x88ccff, metalness:0, roughness:1 });
+    const inst = new THREE.InstancedMesh(cube, mat, count);
+    const dummy = new THREE.Object3D();
+    for(let i=0;i<count;i++){ const v = voxels[i]; dummy.position.set(v.x + voxelSize/2, v.y + voxelSize/2, v.z + voxelSize/2); dummy.updateMatrix(); inst.setMatrixAt(i, dummy.matrix); }
+    inst.instanceMatrix.needsUpdate = true; return inst;
+  }
+  function buildPreview(voxels, voxelSize, fast=false){
+    if(previewGroup){ scene.remove(previewGroup); previewGroup=null; }
+    previewGroup = new THREE.Group();
+    const mesh = buildInstancedPreview(voxels, voxelSize, fast ? 30000 : 120000);
+    previewGroup.add(mesh);
+    scene.add(previewGroup);
+  }
+
+  /* ===== Buttons ===== */
+  el('convertBtn')?.addEventListener('click', ()=>{
+    if(!dataRoot){ log('Load a model first.'); return; }
+    if(pendingLoads>0){ log('Textures still loading — please wait.'); return; }
+    const vs = parseFloat(el('voxelSize')?.value)||0.05;
+    const solid = !!el('solidFill')?.checked;
+    const bake = !!el('bakeColor')?.checked;
+    const scale16 = !!el('bbScale')?.checked;
+
+    log('Voxelizing… size=', vs, 'solid=', solid, 'bake=', bake);
+    const t0 = performance.now();
+    const { voxels, grid } = voxelizeSurface(dataRoot, vs, { solidFill: solid });
+    log(`Voxels: ${voxels.length} (took ${(performance.now()-t0|0)} ms)`);
+    if(!voxels.length){ log('No voxels found. Try a smaller voxel size.'); return; }
+
+    buildPreview(voxels, vs, false);
+    const atlas = bake ? bakePalette(voxels, dataRoot, grid) : null;
+    lastBBModel = exportBBModel(voxels, grid, atlas, scale16);
+    el('exportBtn') && (el('exportBtn').disabled = false);
+    log('Ready to export.');
+  });
+  el('fastBtn')?.addEventListener('click', ()=>{
+    if(!dataRoot){ log('Load a model first.'); return; }
+    if(pendingLoads>0){ log('Textures still loading — please wait.'); return; }
+    let vs = parseFloat(el('voxelSize')?.value)||0.05;
+    const target = 20000; let voxels=[], grid=null, tries=0;
+    const t0 = performance.now();
+    do{
+      const res = voxelizeSurface(dataRoot, vs, { solidFill:false });
+      voxels = res.voxels; grid = res.grid;
+      if(voxels.length > target) vs *= 1.5;
+    } while(voxels.length > target && ++tries < 6);
+    log(`Fast preview: voxels=${voxels.length} at voxelSize=${vs.toFixed(3)} (took ${(performance.now()-t0|0)} ms)`);
+    if(!voxels.length){ log('No voxels found.'); return; }
+    buildPreview(voxels, vs, true);
+  });
+  el('exportBtn')?.addEventListener('click', ()=>{ if(lastBBModel) downloadJSON('voxelized.bbmodel', lastBBModel); });
+  el('resetBtn')?.addEventListener('click', ()=>{
+    if(viewRoot){ scene.remove(viewRoot); viewRoot=null; }
+    if(previewGroup){ scene.remove(previewGroup); previewGroup=null; }
+    dataRoot=null; lastBBModel=null; el('exportBtn') && (el('exportBtn').disabled=true);
+    setEnabled(false,false); setStatus('', 'No model loaded'); log('Scene reset (textures/MTL kept).');
+  });
+  el('resetAllBtn')?.addEventListener('click', ()=>{
+    if(viewRoot){ scene.remove(viewRoot); viewRoot=null; }
+    if(previewGroup){ scene.remove(previewGroup); previewGroup=null; }
+    dataRoot=null; lastBBModel=null; el('exportBtn') && (el('exportBtn').disabled=true);
+    currentMTL = null; lastOBJFile = null;
+    fileRegistry.clear();
+    ['texFiles','mtlFile','objFile','gltfFile','fbxFile'].forEach(id=>{ const n=el(id); if(n) n.value=''; });
+    setEnabled(false,false); setStatus('', 'No model loaded'); log('All reset (cleared MTL + texture/.bin mapping).');
+  });
+  el('testBtn')?.addEventListener('click', ()=>{
+    try{
+      log('Running tests…');
+      const cube = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial());
+      const r1 = new THREE.Group(); r1.add(cube);
+      const t1 = voxelizeSurface(r1, 0.1, { solidFill:false });
+      console.assert(t1.voxels.length>0, 'Test: expected voxels > 0');
+      log('Test OK');
+    }catch(err){ log('Test error:', err.message||String(err)); }
+  });
+  el('demoBtn')?.addEventListener('click', ()=>{
+    const cube = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+    const g = new THREE.Group(); g.add(cube);
+    installRoots(g);
+    log('Loaded sample cube (demo).');
+  });
+  el('frameBtn')?.addEventListener('click', ()=>{ if(viewRoot) frameObject(viewRoot); });
+
+  /* ===== Init ===== */
+  setStatus('', 'No model loaded');
+  setEnabled(false,false);
+  log('Ready. Upload **textures first**, then MTL, then OBJ — or drop everything together. Keep “Diffuse-only” + “Cap textures” on for big models.');
+}
+</script>
+</body>
+</html>
